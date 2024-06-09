@@ -1,21 +1,10 @@
 from re import sub
 from socket import socket, create_connection
 from sys import argv, exit
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 BUFFER = 4096
 '''Socket buffer size'''
-
-def random_port() -> int:
-    '''
-    Generate random available port number
-
-    Returns:
-        int: Random available port number
-    '''
-    with socket() as sock:
-        sock.bind(('', 0))
-        return sock.getsockname()[1]
 
 def send(sock: socket, data: bytes) -> None:
     '''
@@ -36,176 +25,161 @@ def receive(sock: socket) -> bytes:
 
     Returns:
         bytes: Received data
-    '''
-    data, msg_length = b'', 0
+    '''        
+    data = b''
     
     while True:
         packet = sock.recv(BUFFER)
-
-        if not packet:
-            break
+        if not packet: break
         data += packet
-
-        if len(data) >= msg_length:
-            break
 
     return data
 
-def connect(host: str | None, port: int, url: str) -> socket | None:
+def encode_request(path: str, host: str | None, https: bool) -> bytes:
     '''
-    Connect to server
+    Encode request
 
     Args:
+        path (str): Requested [URL] path
         host (str | None): Hostname, if applicable
-        port (int): Port number
-        sock (socket): Connected socket
-
-    Returns:
-        socket | None: Connected socket, if applicable
-    '''
-    try: return create_connection((host, port), timeout=5)
-    except: print(f'URL: {url}\nStatus: Network Error\n')
-
-def req(path: str, host: str | None) -> bytes:
-    '''
-    Send request
-
-    Args:
-        path (str): _description_
-        host (str | None): Hostname, if applicable
+        https (bool): HTTPS or HTTP
 
     Returns:
         bytes: Encoded request
-    '''
-    request = f'GET {path} HTTP/1.0\r\n'
+    '''    
+    version = '1.1' if https else '1.0'
+    request = f'GET {path} HTTP/{version}\r\n'
     request += f'Host: {host}\r\n'
     request += '\r\n'
+    
     return request.encode()
 
-def fetch_reference(html: str) -> str | None:
+def get_reference(html: str, abs_url: str) -> list[str]:
     '''
     Get URL from image (i.e. referenced object) in HTML
 
     Args:
         html (str): Chunk of HTML
+        abs_url (str): Absolute URL
 
     Returns:
-        str | None: Image URL, if applicable
+        list[str]: List of referenced image URLs
     '''
+    references = [ ]
+    
     for line in html.split('\n'):
         line = line.strip()
-        if line.startswith('<img'):
-            for word in line.split(' '):
-                if word.startswith('src='):
-                    return word.split('=')[1]
 
-def handler(sock: socket, path: str, host: str | None, url: str, url_title: str):
-    '''
-    _summary_
+        # check for image tag
+        if line.lower().startswith('<img'):
+            for word in line.split(' '):
+                # check for src attribute
+                if word.lower().startswith('src='):
+                    # extract and validate URL
+                    url = word.split('=')[1].strip()
+                    url = sub('[\"\']', '', url)
+                    absolute_url = validate_url(abs_url, url)
+                    references.append(absolute_url)
+
+    return references
+
+def handler(url: str, url_title: str) -> None:
+    '''    
+    Handle URL
 
     Args:
-        sock (socket): Connected socket
-        path (str): _description_
-        host (str | None): Hostname, if applicable
-        url (str): _description_
-        url_title (str): Title of URL (e.g. 'URL', 'Redirected URL', etc.)
+        url (str): URL to be handled
+        url_title (str): Title of URL
+    '''
+    # parse url
+    parsed_url = urlparse(url)
+    
+    # init sock and responses
+    sock = responses = None
 
-    Raises:
-        ValueError: Invalid response line
+    # create client socket, connect to server
+    try:
+        if parsed_url.scheme == 'http': sock = create_connection((parsed_url.hostname, 80), 5)
+
+        # use SSL socket for HTTPS
+        elif parsed_url.scheme == 'https':
+            from ssl import create_default_context
+            context = create_default_context()
+            sock = create_connection((parsed_url.hostname, 443), 5)
+            sock = context.wrap_socket(sock, server_hostname = parsed_url.hostname)
+            
+    except: print(f'{url_title}: {url}\nStatus: Network Error')
+
+    if sock:
+        https = True if parsed_url.scheme == 'https' else False
+        
+        # send request
+        send(sock, encode_request(parsed_url.path, parsed_url.hostname, https))
+
+        # receive response
+        response = receive(sock)
+        response = response.decode(errors = 'replace') # or 'ignore'
+        response = response.split('\r\n')
+        response = [ r for r in response if r != '\r\n' or r != '' ]
+
+        # last element is HTML
+        responses = { 'HTML' : response[-1] }
+
+        for word in response[1:-1]:
+            if word != (' ' or '\n'):
+                word = word.strip()
+                if ':' in word:
+                    key, val = word.split(':', 1)
+                    key = key.strip()
+                    val = val.strip()
+                    responses[key] = val
+
+        # separate status from 'HTTP/1.*'
+        status = response[0].split(' ')
+        responses['Status'] = ' '.join(status[1:])
+
+        # print URL and status
+        print(f'{url_title}: {url}\nStatus: {responses['Status']}')
+
+        # check for redirection
+        if status[1] == '301' or status[1] == '302':
+            redirected_url = validate_url(url, responses['Location'])
+            handler(redirected_url, 'Redirected URL')
+
+        # check for referenced URLs
+        for reference in get_reference(responses['HTML'], url):
+            handler(reference, 'Referenced URL')
+            
+        # close socket
+        sock.close()
+
+def validate_url(orig_url: str, relative_url: str) -> str:
+    '''
+    Get absolute URL from relative URL
+
+    Args:
+        orig_url (str): Original URL
+        relative_url (str): Relative URL
 
     Returns:
-        _type_: _description_
+        str: Absolute URL
     '''
-    # send http request                
-    send(sock, req(path, host))
-
-    # receive http response
-    response = receive(sock).decode().split('\r\n')
-    
-    # 'Status' : f'{version} {status_num} {msg}'
-    responses = { 'Status' : response[0] }
-
-    for word in response[1:]:
-        if not word or word == '' or word == ' ' or word == '\n':
-            continue
-
-        elif word:
-            word = word.strip()
-            if word.startswith('<') and (word.endswith('>') or word.endswith('>\r\n') or word.endswith('>\n') or word.endswith('>\r')):
-                responses['HTML'] = word
-
-            elif ': ' in word:
-                key, val = word.split(': ', 1)
-                responses[key] = val
-
-    if responses['Status'] != ('' or ' ' or '\n' or '\r\n' or '\r'):
-        status = responses['Status'].split(' ')
-        # print('hhh', status)
-        # print('eee', responses['Status'])
-        url = sub('[\"\']', '', url)
-        
-        if status == ['']:
-            print(f'{url_title}: {url}')
-            return responses
-
-        responses['Version'] = status[0]
-        responses['Status'] = status[1]
-        responses['Message'] = ' '.join(status[2:])
-
-        # Print the status returned for URL
-        print(f'{url_title}: {url}\nStatus: {responses['Status']} {responses['Message']}')
-        if responses['Version'] and not responses['Version'].startswith('HTTP/'):
-            raise ValueError('Invalid response line')
-
-    return responses
+    return urljoin(orig_url, relative_url)
 
 if __name__ == '__main__':
-    # get urls_file name from command line
+    # get filename from command line
     if len(argv) != 2:
-        print('Usage: monitor urls_file')
+        print('Usage: monitor urls-file')
         exit()
 
     # text file to get list of urls
-    urls_file = argv[1]
+    urls = argv[1]
 
     # Parse URLs from file
-    with open(urls_file, 'r') as f:
+    with open(urls, 'r') as f:
         for url in f.readlines():
-            # parse url
             url = url.strip()
-            parsed_url = urlparse(url)
-            
-            # server/host
-            host = parsed_url.hostname
 
-            # port 80 for http, port 443 for https, random + available port for others
-            port = parsed_url.port if parsed_url.port else 443 if parsed_url.scheme == 'https' else 80 if parsed_url.scheme == 'http' else random_port()
-
-            # path
-            path = parsed_url.path if parsed_url.path else '/'
-
-            # create client socket, connect to server
-            sock = connect(host, port, url)
-            
-            if sock:
-                redirect, fetch = False, False
-                
-                header_info = handler(sock, path, host, url, 'URL')
-
-                # Follow URL redirection
-                if header_info['Status'] == ('301' or '302'):
-                    redirect = True
-                    url = header_info['Location'] if 'Location' in header_info else url
-                    handler(sock, path, host, url, 'Redirected URL')
-                
-                # Fetch referenced object
-                reference = fetch_reference(header_info['HTML'])
-                if reference:
-                    fetch = True
-                    handler(sock, reference, host, url, 'Referenced URL')
-
-                # Monitor HTTPS URLs
-
-                sock.close()
-
+            if url:
+                handler(url, 'URL')
                 print()
