@@ -4,17 +4,7 @@ from sys import argv, exit
 from urllib.parse import urljoin, urlparse
 
 BUFFER = 4096
-'''Socket buffer size'''
-
-def send(sock: socket, data: bytes) -> None:
-    '''
-    Send data to socket
-
-    Args:
-        sock (socket): Connected socket
-        data (bytes): Data packet to be sent
-    '''
-    sock.sendall(data)
+'''Socket buffer size'''    
 
 def receive(sock: socket) -> bytes:
     '''
@@ -53,6 +43,19 @@ def encode_request(path: str, host: str | None, https: bool) -> bytes:
     request += '\r\n'
     
     return request.encode()
+
+def validate_url(orig_url: str, relative_url: str) -> str:
+    '''
+    Get absolute URL from relative URL
+
+    Args:
+        orig_url (str): Original URL
+        relative_url (str): Relative URL
+
+    Returns:
+        str: Absolute URL
+    '''
+    return urljoin(orig_url, relative_url)
 
 def get_reference(html: str, abs_url: str) -> list[str]:
     '''
@@ -113,25 +116,25 @@ def handler(url: str, url_title: str) -> None:
     if sock:
         https = True if parsed_url.scheme == 'https' else False
         
-        # send request
-        send(sock, encode_request(parsed_url.path, parsed_url.hostname, https))
+        # send encoded request
+        sock.sendall(encode_request(parsed_url.path, parsed_url.hostname, https))
 
-        # receive response
+        # receive, decode, and split response
         response = receive(sock)
-        response = response.decode(errors = 'replace') # or 'ignore'
+        response = response.decode(errors = 'replace') # alt: errors = 'ignore'
         response = response.split('\r\n')
-        response = [ r for r in response if r != '\r\n' or r != '' ]
+        response = [ r for r in response if r != '\r\n' and r != '' ]
 
-        # last element is HTML
+        # last element is HTML chunk
         responses = { 'HTML' : response[-1] }
 
+        # parse info from response
         for word in response[1:-1]:
             if word != (' ' or '\n'):
                 word = word.strip()
                 if ':' in word:
                     key, val = word.split(':', 1)
-                    key = key.strip()
-                    val = val.strip()
+                    key, val = key.strip(), val.strip()
                     responses[key] = val
 
         # separate status from 'HTTP/1.*'
@@ -152,19 +155,6 @@ def handler(url: str, url_title: str) -> None:
             
         # close socket
         sock.close()
-
-def validate_url(orig_url: str, relative_url: str) -> str:
-    '''
-    Get absolute URL from relative URL
-
-    Args:
-        orig_url (str): Original URL
-        relative_url (str): Relative URL
-
-    Returns:
-        str: Absolute URL
-    '''
-    return urljoin(orig_url, relative_url)
 
 if __name__ == '__main__':
     # get filename from command line
