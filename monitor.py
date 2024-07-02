@@ -159,7 +159,7 @@ def handler(url: str, url_title: str) -> None:
 if __name__ == '__main__':
     # get filename from command line
     if len(argv) != 2:
-        print('Usage: monitor urls-file')
+        print('Usage: python monitor.py urls-file')
         exit()
 
     # text file to get list of urls
